@@ -11,6 +11,7 @@ import sys
 import time
 import threading
 import ast
+import re
 from aws_agent import AWSAgentCore
 
 # =========================
@@ -107,6 +108,40 @@ def ensure_utf8_string(text) -> str:
     if isinstance(text, bytes):
         return text.decode('utf-8', errors='replace')
     return str(text)
+
+def split_multiple_json_objects(response: str) -> list:
+    """Dividir string que contiene múltiples objetos JSON separados"""
+    # Limpiar espacios y saltos de línea entre objetos
+    response = response.strip()
+    
+    # Buscar patrones de múltiples JSONs
+    if '}{' in response:
+        # Caso: {"obj1":...}{"obj2":...}
+        parts = response.split('}{')
+        json_objects = []
+        for i, part in enumerate(parts):
+            if i == 0:
+                json_objects.append(part + '}')
+            elif i == len(parts) - 1:
+                json_objects.append('{' + part)
+            else:
+                json_objects.append('{' + part + '}')
+        return json_objects
+    elif '}\n{' in response or '}\n\n{' in response:
+        # Caso: {"obj1":...}\n{"obj2":...}
+        parts = re.split(r'}\s*\n\s*{', response)
+        json_objects = []
+        for i, part in enumerate(parts):
+            if i == 0:
+                json_objects.append(part + '}')
+            elif i == len(parts) - 1:
+                json_objects.append('{' + part)
+            else:
+                json_objects.append('{' + part + '}')
+        return json_objects
+    else:
+        # Un solo objeto
+        return [response]
 
 # =========================
 # WhatsApp API
@@ -396,23 +431,37 @@ def process_text_message_async(from_user: str, content: str) -> None:
                 # Intentar parsear como JSON o diccionario Python
                 try:
                     if isinstance(agent_response, str):
-                        # Intentar parsear como JSON primero
-                        try:
-                            parsed_response = json.loads(agent_response)
-                            logger.info("Respuesta JSON parseada correctamente desde string")
-                        except json.JSONDecodeError:
-                            # Si no es JSON, intentar como diccionario Python
-                            try:
-                                parsed_response = ast.literal_eval(agent_response)
-                                logger.info("Respuesta dict-string parseada correctamente")
-                            except (ValueError, SyntaxError):
-                                # Si no es ni JSON ni dict válido, tratarlo como texto plano
-                                logger.info("Respuesta de texto plano (no JSON ni dict)")
-                                success = whatsapp_api.send_text_message(from_user, str(agent_response))
-                                parsed_response = None
+                        # Dividir en múltiples objetos JSON si es necesario
+                        json_objects = split_multiple_json_objects(agent_response)
+                        logger.info(f"Detectados {len(json_objects)} objeto(s) JSON")
                         
-                        if parsed_response is not None:
-                            success = process_agent_response(from_user, parsed_response)
+                        success = True
+                        for i, json_obj in enumerate(json_objects):
+                            logger.info(f"Procesando objeto JSON {i+1}/{len(json_objects)}")
+                            
+                            # Intentar parsear cada objeto como JSON primero
+                            try:
+                                parsed_response = json.loads(json_obj)
+                                logger.info(f"Objeto {i+1} parseado como JSON correctamente")
+                            except json.JSONDecodeError:
+                                # Si no es JSON, intentar como diccionario Python
+                                try:
+                                    parsed_response = ast.literal_eval(json_obj)
+                                    logger.info(f"Objeto {i+1} parseado como dict-string correctamente")
+                                except (ValueError, SyntaxError):
+                                    # Si no es ni JSON ni dict válido, tratarlo como texto plano
+                                    logger.info(f"Objeto {i+1} es texto plano (no JSON ni dict)")
+                                    obj_success = whatsapp_api.send_text_message(from_user, str(json_obj))
+                                    success = success and obj_success
+                                    continue
+                            
+                            # Procesar el objeto parseado
+                            obj_success = process_agent_response(from_user, parsed_response)
+                            success = success and obj_success
+                            
+                            # Pequeña pausa entre múltiples mensajes
+                            if len(json_objects) > 1 and i < len(json_objects) - 1:
+                                time.sleep(0.5)
                             
                     elif isinstance(agent_response, dict):
                         # Ya es dict
