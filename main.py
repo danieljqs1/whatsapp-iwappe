@@ -378,20 +378,32 @@ def process_text_message_async(from_user: str, content: str) -> None:
         logger.info(f"Procesando mensaje de texto en background de {from_user}: {content[:50]}...")
         
         if aws_agent.is_available():
-            session_id = f"whatsapp_user_{from_user}_session"
+            session_id = f"whatsapp_{from_user}"
             logger.info(f"Invocando AWS AgentCore para respuesta con session ID: {session_id}")
             agent_response = aws_agent.invoke_agent(content, session_id=session_id)
             
-            if agent_response and isinstance(agent_response, dict):
-                logger.info("Respuesta JSON generada por AWS AgentCore")
-                success = process_agent_response(from_user, agent_response)
-            elif agent_response:
-                # Si es string, tratarlo como mensaje de texto simple
-                logger.info("Respuesta de texto generada por AWS AgentCore")
-                success = whatsapp_api.send_text_message(from_user, str(agent_response))
+            if agent_response:
+                # Intentar parsear como JSON primero
+                try:
+                    if isinstance(agent_response, str):
+                        # El agente devuelve string que contiene JSON
+                        parsed_response = json.loads(agent_response)
+                        logger.info("Respuesta JSON parseada correctamente desde string")
+                        success = process_agent_response(from_user, parsed_response)
+                    elif isinstance(agent_response, dict):
+                        # Ya es dict
+                        logger.info("Respuesta JSON recibida como dict")
+                        success = process_agent_response(from_user, agent_response)
+                    else:
+                        # Otro tipo de dato, convertir a string
+                        success = whatsapp_api.send_text_message(from_user, str(agent_response))
+                except json.JSONDecodeError:
+                    # Si no es JSON válido, tratarlo como texto plano
+                    logger.info("Respuesta de texto plano (no JSON)")
+                    success = whatsapp_api.send_text_message(from_user, str(agent_response))
             else:
                 logger.warning("AWS AgentCore no devolvió respuesta, usando fallback")
-                success = whatsapp_api.send_text_message(from_user, f"Lo siento, no pude procesar tu mensaje en este momento.")
+                success = whatsapp_api.send_text_message(from_user, "Lo siento, no pude procesar tu mensaje en este momento.")
         else:
             # Fallback si AWS AgentCore no está disponible
             response = f"Echo: {content} | Chat ID: {from_user}"
