@@ -2,6 +2,7 @@ import os
 import hashlib
 import requests
 import hmac
+import uuid
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import json
@@ -88,7 +89,17 @@ aws_agent = AWSAgentCore(
 # =========================
 # Utilidades
 # =========================
-def ensure_utf8_string(text) -> str:
+def generate_session_id(from_user: str) -> str:
+    """Generar session ID que cumpla con los requisitos de AWS (mínimo 33 caracteres)"""
+    # Generar UUID y combinarlo con user info para garantizar longitud mínima
+    unique_id = str(uuid.uuid4())
+    session_id = f"whatsapp_{from_user}_{unique_id}"
+    
+    # Asegurar que tenga al menos 33 caracteres
+    if len(session_id) < 33:
+        session_id = session_id + "_" + str(int(time.time()))
+    
+    return session_id[:128]  # AWS también tiene límite máximo de 128 caracteres
     """Asegurar que el texto sea UTF-8"""
     if text is None:
         return ""
@@ -378,7 +389,7 @@ def process_text_message_async(from_user: str, content: str) -> None:
         logger.info(f"Procesando mensaje de texto en background de {from_user}: {content[:50]}...")
         
         if aws_agent.is_available():
-            session_id = f"whatsapp_{from_user}"
+            session_id = generate_session_id(from_user)
             logger.info(f"Invocando AWS AgentCore para respuesta con session ID: {session_id}")
             agent_response = aws_agent.invoke_agent(content, session_id=session_id)
             
