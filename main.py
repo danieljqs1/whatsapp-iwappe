@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 import time
+import threading
 from aws_agent import AWSAgentCore
 
 # =========================
@@ -233,15 +234,15 @@ wechat_api = WeChatAPI()
 # =========================
 # Handlers de mensajes
 # =========================
-def handle_text_message(from_user: str, content: str) -> None:
-    """Manejar mensaje de texto"""
+def process_text_message_async(from_user: str, content: str) -> None:
+    """Procesar mensaje de texto de forma asíncrona"""
     try:
-        logger.info(f"Procesando mensaje de texto de {from_user}: {content[:50]}...")
+        logger.info(f"Procesando mensaje de texto en background de {from_user}: {content[:50]}...")
         
         # Usar AWS AgentCore para generar respuesta
         if aws_agent.is_available():
-            logger.info("Invocando AWS AgentCore para respuesta")
-            agent_response = aws_agent.invoke_agent(content)
+            logger.info(f"Invocando AWS AgentCore para respuesta con session ID: {from_user}")
+            agent_response = aws_agent.invoke_agent(content, session_id=from_user)
             
             if agent_response:
                 response = agent_response
@@ -260,8 +261,25 @@ def handle_text_message(from_user: str, content: str) -> None:
             logger.error(f"No se pudo enviar respuesta a {from_user}")
             
     except Exception as e:
-        logger.exception(f"Error manejando mensaje de texto: {e}")
+        logger.exception(f"Error procesando mensaje de texto en background: {e}")
         wechat_api.send_message(from_user, "Error procesando tu mensaje")
+
+def handle_text_message(from_user: str, content: str) -> None:
+    """Manejar mensaje de texto - respuesta inmediata + procesamiento async"""
+    try:
+        logger.info(f"Recibido mensaje de texto de {from_user}: {content[:50]}...")
+        
+        # Procesar mensaje en background thread
+        thread = threading.Thread(
+            target=process_text_message_async,
+            args=(from_user, content),
+            daemon=True
+        )
+        thread.start()
+        logger.info("Mensaje enviado a procesamiento en background")
+            
+    except Exception as e:
+        logger.exception(f"Error manejando mensaje de texto: {e}")
 
 def handle_image_message(from_user: str, media_id: str) -> None:
     """Manejar mensaje de imagen"""

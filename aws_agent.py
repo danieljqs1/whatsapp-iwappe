@@ -28,12 +28,13 @@ class AWSAgentCore:
             logger.error(f"Error inicializando cliente AWS AgentCore: {e}")
             self.agent_core_client = None
     
-    def invoke_agent(self, prompt: str) -> Optional[str]:
+    def invoke_agent(self, prompt: str, session_id: str = None) -> Optional[str]:
         """
         Invocar el agente de AgentCore con un prompt
         
         Args:
             prompt: Texto de entrada para el agente
+            session_id: ID de sesión para mantener contexto conversacional
             
         Returns:
             Respuesta del agente o None si hay error
@@ -52,11 +53,19 @@ class AWSAgentCore:
             
             logger.info(f"Invocando agente con prompt: {prompt[:50]}...")
             
+            # Preparar parámetros de invocación
+            invoke_params = {
+                'agentRuntimeArn': self.agent_arn,
+                'payload': payload
+            }
+            
+            # Agregar session ID si se proporciona
+            if session_id:
+                invoke_params['runtimeSessionId'] = session_id
+                logger.info(f"Usando session ID: {session_id}")
+            
             # Invocar agente usando la API correcta
-            response = self.agent_core_client.invoke_agent_runtime(
-                agentRuntimeArn=self.agent_arn,
-                payload=payload
-            )
+            response = self.agent_core_client.invoke_agent_runtime(**invoke_params)
             
             # Procesar respuesta
             content = []
