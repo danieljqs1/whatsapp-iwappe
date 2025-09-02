@@ -1,7 +1,7 @@
 import os
 import hashlib
 import requests
-import xml.etree.ElementTree as ET
+import hmac
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import json
@@ -27,7 +27,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('wechat_bot.log', encoding='utf-8'),
+        logging.FileHandler('whatsapp_bot.log', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -48,10 +48,11 @@ app.config.update(
 # =========================
 class Config:
     def __init__(self):
-        self.WECHAT_CONFIG = {
-            'app_id': os.getenv('WECHAT_APP_ID'),
-            'app_secret': os.getenv('WECHAT_APP_SECRET'),
-            'token': os.getenv('WECHAT_TOKEN')
+        self.WHATSAPP_CONFIG = {
+            'access_token': os.getenv('WHATSAPP_ACCESS_TOKEN'),
+            'verify_token': os.getenv('WHATSAPP_VERIFY_TOKEN'),
+            'app_secret': os.getenv('WHATSAPP_APP_SECRET'),
+            'phone_number_id': os.getenv('WHATSAPP_PHONE_NUMBER_ID')
         }
         self.AWS_CONFIG = {
             'agent_arn': os.getenv('AWS_AGENT_ARN', 'arn:aws:bedrock-agentcore:us-east-1:979565263676:runtime/main-ZQLI8JE0PH'),
@@ -63,11 +64,11 @@ class Config:
         self._validate_config()
 
     def _validate_config(self):
-        missing_wechat = [k for k, v in self.WECHAT_CONFIG.items() if not v]
-        if missing_wechat:
-            logger.error(f"Configuración WeChat faltante: {missing_wechat}")
+        missing_whatsapp = [k for k, v in self.WHATSAPP_CONFIG.items() if not v]
+        if missing_whatsapp:
+            logger.error(f"Configuración WhatsApp faltante: {missing_whatsapp}")
         else:
-            logger.info("Configuración WeChat cargada correctamente")
+            logger.info("Configuración WhatsApp cargada correctamente")
         
         if self.AWS_CONFIG['agent_arn']:
             logger.info(f"Configuración AWS AgentCore: {self.AWS_CONFIG['agent_arn'][:50]}...")
@@ -75,16 +76,6 @@ class Config:
             logger.warning("AWS_AGENT_ARN no configurado, usando valor por defecto")
 
 config = Config()
-
-# =========================
-# Estado global simplificado
-# =========================
-class AppState:
-    def __init__(self):
-        self.access_token = None
-        self.token_expires_at = None
-
-app_state = AppState()
 
 # =========================
 # AWS AgentCore
@@ -108,83 +99,49 @@ def ensure_utf8_string(text) -> str:
     return str(text)
 
 # =========================
-# WeChat API
+# WhatsApp API
 # =========================
-class WeChatAPI:
+class WhatsAppAPI:
     @staticmethod
-    def get_access_token() -> str:
-        """Obtener access token de WeChat"""
-        if (app_state.access_token and 
-            app_state.token_expires_at and 
-            datetime.now() < app_state.token_expires_at):
-            return app_state.access_token
-        
-        try:
-            url = "https://api.weixin.qq.com/cgi-bin/token"
-            params = {
-                'grant_type': 'client_credential',
-                'appid': config.WECHAT_CONFIG['app_id'],
-                'secret': config.WECHAT_CONFIG['app_secret']
-            }
-            
-            response = requests.get(url, params=params, timeout=config.REQUEST_TIMEOUT)
-            data = response.json()
-            
-            if 'access_token' in data:
-                app_state.access_token = data['access_token']
-                expires_in = int(data.get('expires_in', 7200))
-                app_state.token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)
-                logger.info("Access token renovado correctamente")
-                return app_state.access_token
-            else:
-                logger.error(f"Error obteniendo access token: {data}")
-                return None
-                
-        except Exception as e:
-            logger.exception(f"Error en get_access_token: {e}")
-            return None
-
-    @staticmethod
-    def send_message(to_user: str, message: str) -> bool:
-        """Enviar mensaje de texto a usuario de WeChat"""
-        token = WeChatAPI.get_access_token()
-        if not token:
-            logger.error("No se pudo obtener access_token")
+    def send_text_message(to_user: str, message: str) -> bool:
+        """Enviar mensaje de texto a usuario de WhatsApp"""
+        if not config.WHATSAPP_CONFIG['access_token']:
+            logger.error("Access token de WhatsApp no configurado")
             return False
         
-        url = f"https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token={token}"
+        url = f"https://graph.facebook.com/v18.0/{config.WHATSAPP_CONFIG['phone_number_id']}/messages"
         clean_message = ensure_utf8_string(message)
         
         # Limitar longitud del mensaje
-        if len(clean_message) > 2000:
-            clean_message = clean_message[:1990] + "\n\n[Mensaje truncado]"
+        if len(clean_message) > 4096:
+            clean_message = clean_message[:4090] + "..."
         
         payload = {
-            "touser": to_user,
-            "msgtype": "text",
-            "text": {"content": clean_message}
+            "messaging_product": "whatsapp",
+            "to": to_user,
+            "type": "text",
+            "text": {"body": clean_message}
         }
         
         headers = {
-            'Content-Type': 'application/json; charset=utf-8',
-            'User-Agent': 'WeChat-SimpleBot/1.0'
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {config.WHATSAPP_CONFIG["access_token"]}'
         }
         
         for intento in range(config.MAX_RETRIES):
             try:
                 resp = requests.post(
                     url, 
-                    data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+                    json=payload,
                     headers=headers, 
                     timeout=config.REQUEST_TIMEOUT
                 )
-                result = resp.json()
                 
-                if result.get('errcode', 0) == 0:
+                if resp.status_code == 200:
                     logger.info(f"Mensaje enviado exitosamente a {to_user}")
                     return True
                 else:
-                    logger.warning(f"Error enviando mensaje (intento {intento+1}): {result}")
+                    logger.warning(f"Error enviando mensaje (intento {intento+1}): {resp.status_code} - {resp.text}")
                     if intento < config.MAX_RETRIES - 1:
                         time.sleep(0.5 * (intento + 1))
                         
@@ -197,39 +154,220 @@ class WeChatAPI:
         return False
 
     @staticmethod
-    def verify_signature(signature: str, timestamp: str, nonce: str) -> bool:
-        """Verificar firma del webhook de WeChat"""
-        token = config.WECHAT_CONFIG.get('token')
-        if not token:
+    def send_interactive_buttons(to_user: str, message_data: dict) -> bool:
+        """Enviar mensaje con botones interactivos"""
+        if not config.WHATSAPP_CONFIG['access_token']:
+            logger.error("Access token de WhatsApp no configurado")
             return False
         
-        tmp_list = [token, timestamp, nonce]
-        tmp_list.sort()
-        tmp_str = ''.join(tmp_list)
-        computed_signature = hashlib.sha1(tmp_str.encode('utf-8')).hexdigest()
+        url = f"https://graph.facebook.com/v18.0/{config.WHATSAPP_CONFIG['phone_number_id']}/messages"
         
-        return computed_signature == signature
+        buttons = []
+        for btn in message_data.get('buttons', [])[:3]:  # WhatsApp permite máximo 3 botones
+            buttons.append({
+                "type": "reply",
+                "reply": {
+                    "id": btn.get('id', ''),
+                    "title": btn.get('title', '')[:20]  # Máximo 20 caracteres
+                }
+            })
+        
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_user,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": message_data.get('message', '')},
+                "action": {"buttons": buttons}
+            }
+        }
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {config.WHATSAPP_CONFIG["access_token"]}'
+        }
+        
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=config.REQUEST_TIMEOUT)
+            if resp.status_code == 200:
+                logger.info(f"Botones enviados exitosamente a {to_user}")
+                return True
+            else:
+                logger.warning(f"Error enviando botones: {resp.status_code} - {resp.text}")
+                return False
+        except Exception as e:
+            logger.exception(f"Error enviando botones: {e}")
+            return False
 
     @staticmethod
-    def parse_xml_message(xml_data) -> dict:
-        """Parsear mensaje XML de WeChat"""
+    def send_list_message(to_user: str, message_data: dict) -> bool:
+        """Enviar mensaje con lista de opciones"""
+        if not config.WHATSAPP_CONFIG['access_token']:
+            logger.error("Access token de WhatsApp no configurado")
+            return False
+        
+        url = f"https://graph.facebook.com/v18.0/{config.WHATSAPP_CONFIG['phone_number_id']}/messages"
+        
+        sections = []
+        for section in message_data.get('list_sections', []):
+            rows = []
+            for row in section.get('rows', [])[:10]:  # Máximo 10 opciones por sección
+                rows.append({
+                    "id": row.get('id', ''),
+                    "title": row.get('title', '')[:24],  # Máximo 24 caracteres
+                    "description": row.get('description', '')[:72]  # Máximo 72 caracteres
+                })
+            
+            if rows:
+                sections.append({
+                    "title": section.get('title', '')[:24],
+                    "rows": rows
+                })
+        
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_user,
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "body": {"text": message_data.get('message', '')},
+                "action": {
+                    "button": "Ver opciones",
+                    "sections": sections
+                }
+            }
+        }
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {config.WHATSAPP_CONFIG["access_token"]}'
+        }
+        
         try:
-            if isinstance(xml_data, bytes):
-                xml_data = xml_data.decode('utf-8')
-            
-            root = ET.fromstring(ensure_utf8_string(xml_data))
-            message = {}
-            
-            for child in root:
-                message[child.tag] = ensure_utf8_string(child.text or "")
-            
-            return message
-            
+            resp = requests.post(url, json=payload, headers=headers, timeout=config.REQUEST_TIMEOUT)
+            if resp.status_code == 200:
+                logger.info(f"Lista enviada exitosamente a {to_user}")
+                return True
+            else:
+                logger.warning(f"Error enviando lista: {resp.status_code} - {resp.text}")
+                return False
         except Exception as e:
-            logger.exception(f"Error parsing XML: {e}")
-            return {}
+            logger.exception(f"Error enviando lista: {e}")
+            return False
 
-wechat_api = WeChatAPI()
+    @staticmethod
+    def send_media_message(to_user: str, message_data: dict) -> bool:
+        """Enviar mensaje con imagen"""
+        if not config.WHATSAPP_CONFIG['access_token']:
+            logger.error("Access token de WhatsApp no configurado")
+            return False
+        
+        url = f"https://graph.facebook.com/v18.0/{config.WHATSAPP_CONFIG['phone_number_id']}/messages"
+        
+        media = message_data.get('media', {})
+        media_type = media.get('type', 'image')
+        
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to_user,
+            "type": media_type,
+            media_type: {
+                "link": media.get('url', ''),
+                "caption": media.get('caption', '')[:1024]  # Máximo 1024 caracteres para caption
+            }
+        }
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {config.WHATSAPP_CONFIG["access_token"]}'
+        }
+        
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=config.REQUEST_TIMEOUT)
+            if resp.status_code == 200:
+                logger.info(f"Media enviado exitosamente a {to_user}")
+                return True
+            else:
+                logger.warning(f"Error enviando media: {resp.status_code} - {resp.text}")
+                return False
+        except Exception as e:
+            logger.exception(f"Error enviando media: {e}")
+            return False
+
+    @staticmethod
+    def verify_webhook(verify_token: str, mode: str, challenge: str) -> str:
+        """Verificar webhook de WhatsApp"""
+        if mode == "subscribe" and verify_token == config.WHATSAPP_CONFIG['verify_token']:
+            logger.info("Webhook verificado correctamente")
+            return challenge
+        else:
+            logger.warning("Fallo en verificación de webhook")
+            return None
+
+    @staticmethod
+    def verify_signature(payload: bytes, signature: str) -> bool:
+        """Verificar firma del payload de WhatsApp"""
+        if not config.WHATSAPP_CONFIG['app_secret']:
+            logger.warning("App secret no configurado, saltando verificación de firma")
+            return True
+        
+        try:
+            expected_signature = hmac.new(
+                config.WHATSAPP_CONFIG['app_secret'].encode('utf-8'),
+                payload,
+                hashlib.sha256
+            ).hexdigest()
+            
+            # Remover 'sha256=' del inicio si está presente
+            signature = signature.replace('sha256=', '')
+            
+            return hmac.compare_digest(expected_signature, signature)
+        except Exception as e:
+            logger.exception(f"Error verificando firma: {e}")
+            return False
+
+whatsapp_api = WhatsAppAPI()
+
+# =========================
+# Procesador de respuestas del agente
+# =========================
+def process_agent_response(to_user: str, agent_response: dict) -> bool:
+    """Procesar respuesta del agente y enviar mensaje apropiado"""
+    try:
+        response_type = agent_response.get('response_type', 'text')
+        
+        if response_type == 'text':
+            return whatsapp_api.send_text_message(to_user, agent_response.get('message', ''))
+        
+        elif response_type == 'buttons':
+            return whatsapp_api.send_interactive_buttons(to_user, agent_response)
+        
+        elif response_type == 'list':
+            return whatsapp_api.send_list_message(to_user, agent_response)
+        
+        elif response_type in ['media', 'image', 'media_with_buttons']:
+            # Primero enviar la imagen
+            success = whatsapp_api.send_media_message(to_user, agent_response)
+            
+            # Si hay botones, enviarlos después
+            if success and agent_response.get('buttons'):
+                time.sleep(1)  # Pequeña pausa entre mensajes
+                button_data = {
+                    'message': agent_response.get('message', '¿Qué te gustaría hacer?'),
+                    'buttons': agent_response.get('buttons', [])
+                }
+                whatsapp_api.send_interactive_buttons(to_user, button_data)
+            
+            return success
+        
+        else:
+            logger.warning(f"Tipo de respuesta no soportado: {response_type}")
+            return whatsapp_api.send_text_message(to_user, agent_response.get('message', 'Error procesando respuesta'))
+    
+    except Exception as e:
+        logger.exception(f"Error procesando respuesta del agente: {e}")
+        return whatsapp_api.send_text_message(to_user, "Error procesando tu solicitud")
 
 # =========================
 # Handlers de mensajes
@@ -239,34 +377,36 @@ def process_text_message_async(from_user: str, content: str) -> None:
     try:
         logger.info(f"Procesando mensaje de texto en background de {from_user}: {content[:50]}...")
         
-        # Usar AWS AgentCore para generar respuesta
         if aws_agent.is_available():
-            session_id = f"wechat_{from_user}"
+            session_id = f"whatsapp_{from_user}"
             logger.info(f"Invocando AWS AgentCore para respuesta con session ID: {session_id}")
             agent_response = aws_agent.invoke_agent(content, session_id=session_id)
             
-            if agent_response:
-                response = agent_response
-                logger.info("Respuesta generada por AWS AgentCore")
+            if agent_response and isinstance(agent_response, dict):
+                logger.info("Respuesta JSON generada por AWS AgentCore")
+                success = process_agent_response(from_user, agent_response)
+            elif agent_response:
+                # Si es string, tratarlo como mensaje de texto simple
+                logger.info("Respuesta de texto generada por AWS AgentCore")
+                success = whatsapp_api.send_text_message(from_user, str(agent_response))
             else:
-                response = f"Lo siento, no pude procesar tu mensaje en este momento. (ID: {from_user})"
                 logger.warning("AWS AgentCore no devolvió respuesta, usando fallback")
+                success = whatsapp_api.send_text_message(from_user, f"Lo siento, no pude procesar tu mensaje en este momento.")
         else:
             # Fallback si AWS AgentCore no está disponible
             response = f"Echo: {content} | Chat ID: {from_user}"
+            success = whatsapp_api.send_text_message(from_user, response)
             logger.warning("AWS AgentCore no disponible, usando modo eco")
         
-        # Enviar respuesta
-        success = wechat_api.send_message(from_user, response)
         if not success:
             logger.error(f"No se pudo enviar respuesta a {from_user}")
             
     except Exception as e:
         logger.exception(f"Error procesando mensaje de texto en background: {e}")
-        wechat_api.send_message(from_user, "Error procesando tu mensaje")
+        whatsapp_api.send_text_message(from_user, "Error procesando tu mensaje")
 
 def handle_text_message(from_user: str, content: str) -> None:
-    """Manejar mensaje de texto - respuesta inmediata + procesamiento async"""
+    """Manejar mensaje de texto - procesamiento async"""
     try:
         logger.info(f"Recibido mensaje de texto de {from_user}: {content[:50]}...")
         
@@ -282,122 +422,109 @@ def handle_text_message(from_user: str, content: str) -> None:
     except Exception as e:
         logger.exception(f"Error manejando mensaje de texto: {e}")
 
-def process_image_message_async(from_user: str, media_id: str) -> None:
-    """Procesar mensaje de imagen de forma asíncrona"""
-    try:
-        logger.info(f"Procesando imagen en background de {from_user}, media_id: {media_id}")
-        
-        # Usar AWS AgentCore como si el usuario dijera "Imagen cargada con éxito!"
-        if aws_agent.is_available():
-            session_id = f"wechat_{from_user}"
-            simulated_message = "Imagen cargada con éxito!"
-            logger.info(f"Enviando mensaje simulado al agente: {simulated_message}")
-            
-            agent_response = aws_agent.invoke_agent(simulated_message, session_id=session_id)
-            
-            if agent_response:
-                response = agent_response
-                logger.info("Respuesta generada por AWS AgentCore para imagen")
-            else:
-                response = f"Imagen recibida correctamente (ID: {media_id[:8]}...)"
-                logger.warning("AWS AgentCore no devolvió respuesta para imagen, usando fallback")
-        else:
-            # Fallback si AWS AgentCore no está disponible
-            response = f"Imagen recibida: {media_id[:8]}... | Chat ID: {from_user}"
-            logger.warning("AWS AgentCore no disponible para imagen, usando modo simple")
-        
-        # Enviar respuesta
-        success = wechat_api.send_message(from_user, response)
-        if not success:
-            logger.error(f"No se pudo enviar respuesta de imagen a {from_user}")
-            
-    except Exception as e:
-        logger.exception(f"Error procesando imagen en background: {e}")
-        wechat_api.send_message(from_user, "Error procesando tu imagen")
-
 def handle_image_message(from_user: str, media_id: str) -> None:
-    """Manejar mensaje de imagen - respuesta inmediata + procesamiento async"""
+    """Manejar mensaje de imagen"""
     try:
         logger.info(f"Recibida imagen de {from_user}, media_id: {media_id}")
         
-        # Procesar imagen en background thread
-        thread = threading.Thread(
-            target=process_image_message_async,
-            args=(from_user, media_id),
-            daemon=True
-        )
-        thread.start()
-        logger.info("Imagen enviada a procesamiento en background")
+        # Para imágenes, simular que el usuario envió un mensaje
+        simulated_message = "He enviado una imagen"
+        handle_text_message(from_user, simulated_message)
             
     except Exception as e:
         logger.exception(f"Error manejando imagen: {e}")
 
-def handle_subscribe_event(from_user: str) -> None:
-    """Manejar evento de suscripción"""
-    welcome_message = """¡Bienvenido a nuestro bot de WeChat!
+def handle_button_response(from_user: str, button_id: str, button_text: str) -> None:
+    """Manejar respuesta de botón"""
+    try:
+        logger.info(f"Botón presionado por {from_user}: {button_id} - {button_text}")
+        
+        # Tratar la respuesta del botón como mensaje de texto
+        handle_text_message(from_user, button_text)
+            
+    except Exception as e:
+        logger.exception(f"Error manejando botón: {e}")
 
-Este es un bot simple que puede:
-- Recibir y responder mensajes de texto
-- Procesar imágenes
-- Mantener un historial básico de conversación
-
-Envía cualquier mensaje para probar."""
-    
-    wechat_api.send_message(from_user, welcome_message)
+def handle_list_response(from_user: str, list_id: str, list_title: str) -> None:
+    """Manejar respuesta de lista"""
+    try:
+        logger.info(f"Opción de lista seleccionada por {from_user}: {list_id} - {list_title}")
+        
+        # Tratar la respuesta de lista como mensaje de texto
+        handle_text_message(from_user, list_title)
+            
+    except Exception as e:
+        logger.exception(f"Error manejando lista: {e}")
 
 # =========================
 # Endpoints
 # =========================
-@app.route('/wechat', methods=['GET', 'POST'])
-def wechat_endpoint():
-    """Endpoint principal del webhook de WeChat"""
+@app.route('/webhook', methods=['GET', 'POST'])
+def webhook():
+    """Endpoint principal del webhook de WhatsApp"""
     if request.method == 'GET':
         # Verificación del webhook
-        signature = request.args.get('signature', '')
-        timestamp = request.args.get('timestamp', '')
-        nonce = request.args.get('nonce', '')
-        echostr = request.args.get('echostr', '')
+        mode = request.args.get('hub.mode')
+        token = request.args.get('hub.verify_token')
+        challenge = request.args.get('hub.challenge')
         
-        if wechat_api.verify_signature(signature, timestamp, nonce):
-            logger.info("Webhook verificado correctamente")
-            return echostr
+        result = whatsapp_api.verify_webhook(token, mode, challenge)
+        if result:
+            return result
         else:
-            logger.warning("Fallo en verificación de webhook")
             return 'Forbidden', 403
     
     # Procesamiento de mensajes POST
     try:
-        xml_data = request.get_data()
-        logger.info(f"Datos XML recibidos: {len(xml_data)} bytes")
+        # Verificar firma si está configurado app_secret
+        signature = request.headers.get('X-Hub-Signature-256', '')
+        if config.WHATSAPP_CONFIG['app_secret'] and not whatsapp_api.verify_signature(request.get_data(), signature):
+            logger.warning("Firma inválida en webhook")
+            return 'Unauthorized', 401
         
-        message = wechat_api.parse_xml_message(xml_data)
-        if not message:
-            logger.warning("No se pudo parsear el mensaje XML")
-            return ''
+        data = request.get_json()
+        if not data:
+            return 'OK'
         
-        msg_type = message.get('MsgType', '')
-        from_user = message.get('FromUserName', '')
+        logger.info(f"Webhook data recibido: {json.dumps(data, indent=2)}")
         
-        logger.info(f"Mensaje recibido - Tipo: {msg_type}, Usuario: {from_user}")
+        # Procesar entradas de WhatsApp
+        for entry in data.get('entry', []):
+            for change in entry.get('changes', []):
+                value = change.get('value', {})
+                
+                # Procesar mensajes
+                for message in value.get('messages', []):
+                    from_user = message.get('from', '')
+                    msg_type = message.get('type', '')
+                    
+                    if msg_type == 'text':
+                        content = message.get('text', {}).get('body', '')
+                        handle_text_message(from_user, content)
+                    
+                    elif msg_type == 'image':
+                        media_id = message.get('image', {}).get('id', '')
+                        handle_image_message(from_user, media_id)
+                    
+                    elif msg_type == 'interactive':
+                        interactive = message.get('interactive', {})
+                        if interactive.get('type') == 'button_reply':
+                            button_reply = interactive.get('button_reply', {})
+                            button_id = button_reply.get('id', '')
+                            button_text = button_reply.get('title', '')
+                            handle_button_response(from_user, button_id, button_text)
+                        
+                        elif interactive.get('type') == 'list_reply':
+                            list_reply = interactive.get('list_reply', {})
+                            list_id = list_reply.get('id', '')
+                            list_title = list_reply.get('title', '')
+                            handle_list_response(from_user, list_id, list_title)
         
-        if msg_type == 'text':
-            content = message.get('Content', '')
-            handle_text_message(from_user, content)
-            
-        elif msg_type == 'image':
-            media_id = message.get('MediaId', '')
-            handle_image_message(from_user, media_id)
-            
-        elif msg_type == 'event':
-            event = message.get('Event', '').upper()
-            if event == 'SUBSCRIBE':
-                handle_subscribe_event(from_user)
-        
-        return ''
+        return 'OK'
         
     except Exception as e:
-        logger.exception(f"Error procesando mensaje POST: {e}")
-        return ''
+        logger.exception(f"Error procesando webhook: {e}")
+        return 'OK'  # Siempre devolver OK para evitar reenvíos
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -406,12 +533,13 @@ def health_check():
         status_data = {
             'status': 'OK',
             'timestamp': datetime.now().isoformat(),
-            'wechat_config': {
-                'app_id_configured': bool(config.WECHAT_CONFIG['app_id']),
-                'app_secret_configured': bool(config.WECHAT_CONFIG['app_secret']),
-                'token_configured': bool(config.WECHAT_CONFIG['token'])
+            'whatsapp_config': {
+                'access_token_configured': bool(config.WHATSAPP_CONFIG['access_token']),
+                'verify_token_configured': bool(config.WHATSAPP_CONFIG['verify_token']),
+                'app_secret_configured': bool(config.WHATSAPP_CONFIG['app_secret']),
+                'phone_number_id_configured': bool(config.WHATSAPP_CONFIG['phone_number_id'])
             },
-            'access_token_valid': bool(app_state.access_token)
+            'aws_agent_available': aws_agent.is_available() if aws_agent else False
         }
         
         response = jsonify(status_data)
@@ -422,28 +550,6 @@ def health_check():
         logger.exception(f"Error en health check: {e}")
         return jsonify({'status': 'ERROR', 'error': str(e)}), 500
 
-@app.route('/send', methods=['POST'])
-def send_message_endpoint():
-    """Endpoint para enviar mensajes programáticamente"""
-    try:
-        data = request.get_json()
-        user_id = data.get('user_id')
-        message = data.get('message')
-        
-        if not user_id or not message:
-            return jsonify({'error': 'user_id y message son requeridos'}), 400
-        
-        success = wechat_api.send_message(user_id, message)
-        
-        if success:
-            return jsonify({'status': 'sent', 'user_id': user_id, 'message': message})
-        else:
-            return jsonify({'error': 'No se pudo enviar el mensaje'}), 500
-            
-    except Exception as e:
-        logger.exception(f"Error enviando mensaje: {e}")
-        return jsonify({'error': str(e)}), 500
-
 @app.route('/', methods=['GET'])
 def index():
     """Página principal"""
@@ -453,7 +559,7 @@ def index():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Bot WeChat Simple</title>
+        <title>Bot WhatsApp con AWS AgentCore</title>
         <style>
             body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
             .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
@@ -464,27 +570,27 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1>🤖 Bot WeChat Simple</h1>
+            <h1>🤖 Bot WhatsApp con AWS AgentCore</h1>
             <div class="status">
                 <strong>✅ Servicio activo</strong>
-                <p>Bot básico de WeChat con webhook configurado y envío de mensajes.</p>
+                <p>Bot de WhatsApp con webhook configurado, integración con AWS AgentCore y soporte para elementos interactivos.</p>
             </div>
             
             <h3>Funcionalidades:</h3>
             <ul>
-                <li>✅ Webhook verificado para WeChat</li>
+                <li>✅ Webhook verificado para WhatsApp Business API</li>
                 <li>✅ Recepción de mensajes de texto e imágenes</li>
-                <li>✅ Envío de respuestas automáticas</li>
-                <li>✅ Historial básico de conversaciones</li>
-                <li>✅ Mensaje de bienvenida en suscripción</li>
+                <li>✅ Integración con AWS AgentCore/Bedrock</li>
+                <li>✅ Botones interactivos</li>
+                <li>✅ Listas de opciones</li>
+                <li>✅ Envío de imágenes con botones</li>
+                <li>✅ Respuestas JSON estructuradas</li>
             </ul>
             
             <h3>Endpoints disponibles:</h3>
-            <div class="endpoint">GET /wechat - Verificación del webhook</div>
-            <div class="endpoint">POST /wechat - Recepción de mensajes</div>
+            <div class="endpoint">GET /webhook - Verificación del webhook</div>
+            <div class="endpoint">POST /webhook - Recepción de mensajes</div>
             <div class="endpoint">GET /health - Estado del servicio</div>
-            <div class="endpoint">GET /users/{user_id}/history - Historial de usuario</div>
-            <div class="endpoint">POST /send - Enviar mensaje programáticamente</div>
         </div>
     </body>
     </html>
@@ -494,25 +600,24 @@ def index():
 # Main
 # =========================
 if __name__ == '__main__':
-    logger.info("🚀 Iniciando Bot WeChat Simple...")
+    logger.info("🚀 Iniciando Bot WhatsApp con AWS AgentCore...")
     
     # Verificar configuración
-    missing_config = [k for k, v in config.WECHAT_CONFIG.items() if not v]
+    missing_config = [k for k, v in config.WHATSAPP_CONFIG.items() if not v]
     if missing_config:
-        logger.error(f"❌ Configuración de WeChat faltante: {missing_config}")
+        logger.error(f"❌ Configuración de WhatsApp faltante: {missing_config}")
     else:
-        logger.info("✅ Configuración de WeChat completa")
+        logger.info("✅ Configuración de WhatsApp completa")
     
-    # Verificar access token
-    token = wechat_api.get_access_token()
-    if token:
-        logger.info("✅ Access token obtenido correctamente")
+    # Verificar AWS AgentCore
+    if aws_agent and aws_agent.is_available():
+        logger.info("✅ AWS AgentCore disponible")
     else:
-        logger.error("❌ No se pudo obtener access token - verifica configuración")
+        logger.error("❌ AWS AgentCore no disponible - usando modo fallback")
     
     # Iniciar servidor
     port = config.PORT
     logger.info(f"🌐 Iniciando servidor en puerto {port}")
-    logger.info("📋 Endpoints: /, /health, /users/<user_id>/history, /send, /wechat")
+    logger.info("📋 Endpoints: /, /health, /webhook")
     
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
