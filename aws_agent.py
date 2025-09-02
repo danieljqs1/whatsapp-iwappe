@@ -1,6 +1,7 @@
 import json
 import boto3
 import logging
+import uuid
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ class AWSAgentCore:
             
             logger.info(f"Invocando agente con prompt: {prompt[:50]}...")
             
-            # Invocar agente
+            # Invocar agente usando la API correcta
             response = self.agent_core_client.invoke_agent_runtime(
                 agentRuntimeArn=self.agent_arn,
                 payload=payload
