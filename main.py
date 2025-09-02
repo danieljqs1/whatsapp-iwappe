@@ -378,7 +378,7 @@ def process_text_message_async(from_user: str, content: str) -> None:
         logger.info(f"Procesando mensaje de texto en background de {from_user}: {content[:50]}...")
         
         if aws_agent.is_available():
-            session_id = f"whatsapp_{from_user}"
+            session_id = f"whatsapp_user_{from_user}_session"
             logger.info(f"Invocando AWS AgentCore para respuesta con session ID: {session_id}")
             agent_response = aws_agent.invoke_agent(content, session_id=session_id)
             
