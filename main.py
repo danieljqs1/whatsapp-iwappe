@@ -100,6 +100,8 @@ def generate_session_id(from_user: str) -> str:
         session_id = session_id + "_" + str(int(time.time()))
     
     return session_id[:128]  # AWS también tiene límite máximo de 128 caracteres
+
+def ensure_utf8_string(text) -> str:
     """Asegurar que el texto sea UTF-8"""
     if text is None:
         return ""
