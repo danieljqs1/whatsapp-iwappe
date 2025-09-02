@@ -241,8 +241,9 @@ def process_text_message_async(from_user: str, content: str) -> None:
         
         # Usar AWS AgentCore para generar respuesta
         if aws_agent.is_available():
-            logger.info(f"Invocando AWS AgentCore para respuesta con session ID: {from_user}")
-            agent_response = aws_agent.invoke_agent(content, session_id=from_user)
+            session_id = f"wechat_{from_user}"
+            logger.info(f"Invocando AWS AgentCore para respuesta con session ID: {session_id}")
+            agent_response = aws_agent.invoke_agent(content, session_id=session_id)
             
             if agent_response:
                 response = agent_response
