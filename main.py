@@ -10,6 +10,7 @@ import logging
 import sys
 import time
 import threading
+import ast
 from aws_agent import AWSAgentCore
 
 # =========================
@@ -396,23 +397,36 @@ def process_text_message_async(from_user: str, content: str) -> None:
             agent_response = aws_agent.invoke_agent(content, session_id=session_id)
             
             if agent_response:
-                # Intentar parsear como JSON primero
+                # Intentar parsear como JSON o diccionario Python
                 try:
                     if isinstance(agent_response, str):
-                        # El agente devuelve string que contiene JSON
-                        parsed_response = json.loads(agent_response)
-                        logger.info("Respuesta JSON parseada correctamente desde string")
-                        success = process_agent_response(from_user, parsed_response)
+                        # Intentar parsear como JSON primero
+                        try:
+                            parsed_response = json.loads(agent_response)
+                            logger.info("Respuesta JSON parseada correctamente desde string")
+                        except json.JSONDecodeError:
+                            # Si no es JSON, intentar como diccionario Python
+                            try:
+                                parsed_response = ast.literal_eval(agent_response)
+                                logger.info("Respuesta dict-string parseada correctamente")
+                            except (ValueError, SyntaxError):
+                                # Si no es ni JSON ni dict válido, tratarlo como texto plano
+                                logger.info("Respuesta de texto plano (no JSON ni dict)")
+                                success = whatsapp_api.send_text_message(from_user, str(agent_response))
+                                parsed_response = None
+                        
+                        if parsed_response is not None:
+                            success = process_agent_response(from_user, parsed_response)
+                            
                     elif isinstance(agent_response, dict):
                         # Ya es dict
-                        logger.info("Respuesta JSON recibida como dict")
+                        logger.info("Respuesta recibida como dict")
                         success = process_agent_response(from_user, agent_response)
                     else:
                         # Otro tipo de dato, convertir a string
                         success = whatsapp_api.send_text_message(from_user, str(agent_response))
-                except json.JSONDecodeError:
-                    # Si no es JSON válido, tratarlo como texto plano
-                    logger.info("Respuesta de texto plano (no JSON)")
+                except Exception as e:
+                    logger.exception(f"Error parseando respuesta del agente: {e}")
                     success = whatsapp_api.send_text_message(from_user, str(agent_response))
             else:
                 logger.warning("AWS AgentCore no devolvió respuesta, usando fallback")
