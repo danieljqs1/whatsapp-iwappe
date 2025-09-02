@@ -282,13 +282,29 @@ def handle_text_message(from_user: str, content: str) -> None:
     except Exception as e:
         logger.exception(f"Error manejando mensaje de texto: {e}")
 
-def handle_image_message(from_user: str, media_id: str) -> None:
-    """Manejar mensaje de imagen"""
+def process_image_message_async(from_user: str, media_id: str) -> None:
+    """Procesar mensaje de imagen de forma asíncrona"""
     try:
-        logger.info(f"Procesando imagen de {from_user}, media_id: {media_id}")
+        logger.info(f"Procesando imagen en background de {from_user}, media_id: {media_id}")
         
-        # Respuesta simple con info de la imagen y chat ID
-        response = f"Imagen recibida: {media_id[:8]}... | Chat ID: {from_user}"
+        # Usar AWS AgentCore como si el usuario dijera "Imagen cargada con éxito!"
+        if aws_agent.is_available():
+            session_id = f"wechat_{from_user}"
+            simulated_message = "Imagen cargada con éxito!"
+            logger.info(f"Enviando mensaje simulado al agente: {simulated_message}")
+            
+            agent_response = aws_agent.invoke_agent(simulated_message, session_id=session_id)
+            
+            if agent_response:
+                response = agent_response
+                logger.info("Respuesta generada por AWS AgentCore para imagen")
+            else:
+                response = f"Imagen recibida correctamente (ID: {media_id[:8]}...)"
+                logger.warning("AWS AgentCore no devolvió respuesta para imagen, usando fallback")
+        else:
+            # Fallback si AWS AgentCore no está disponible
+            response = f"Imagen recibida: {media_id[:8]}... | Chat ID: {from_user}"
+            logger.warning("AWS AgentCore no disponible para imagen, usando modo simple")
         
         # Enviar respuesta
         success = wechat_api.send_message(from_user, response)
@@ -296,8 +312,25 @@ def handle_image_message(from_user: str, media_id: str) -> None:
             logger.error(f"No se pudo enviar respuesta de imagen a {from_user}")
             
     except Exception as e:
-        logger.exception(f"Error manejando imagen: {e}")
+        logger.exception(f"Error procesando imagen en background: {e}")
         wechat_api.send_message(from_user, "Error procesando tu imagen")
+
+def handle_image_message(from_user: str, media_id: str) -> None:
+    """Manejar mensaje de imagen - respuesta inmediata + procesamiento async"""
+    try:
+        logger.info(f"Recibida imagen de {from_user}, media_id: {media_id}")
+        
+        # Procesar imagen en background thread
+        thread = threading.Thread(
+            target=process_image_message_async,
+            args=(from_user, media_id),
+            daemon=True
+        )
+        thread.start()
+        logger.info("Imagen enviada a procesamiento en background")
+            
+    except Exception as e:
+        logger.exception(f"Error manejando imagen: {e}")
 
 def handle_subscribe_event(from_user: str) -> None:
     """Manejar evento de suscripción"""
