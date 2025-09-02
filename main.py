@@ -428,6 +428,9 @@ def process_text_message_async(from_user: str, content: str) -> None:
             agent_response = aws_agent.invoke_agent(content, session_id=session_id)
             
             if agent_response:
+                # DEBUG: Mostrar respuesta completa del agente
+                logger.info(f"RESPUESTA COMPLETA DEL AGENTE: {repr(agent_response)}")
+                
                 # Intentar parsear como JSON o diccionario Python
                 try:
                     if isinstance(agent_response, str):
