@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 import time
+from aws_agent import AWSAgentCore
 
 # =========================
 # Configurar UTF-8
@@ -51,6 +52,10 @@ class Config:
             'app_secret': os.getenv('WECHAT_APP_SECRET'),
             'token': os.getenv('WECHAT_TOKEN')
         }
+        self.AWS_CONFIG = {
+            'agent_arn': os.getenv('AWS_AGENT_ARN', 'arn:aws:bedrock-agentcore:us-east-1:979565263676:runtime/main-ZQLI8JE0PH'),
+            'region': os.getenv('AWS_REGION', 'us-east-1')
+        }
         self.PORT = int(os.getenv('PORT', 5000))
         self.MAX_RETRIES = 3
         self.REQUEST_TIMEOUT = 8
@@ -62,6 +67,11 @@ class Config:
             logger.error(f"Configuración WeChat faltante: {missing_wechat}")
         else:
             logger.info("Configuración WeChat cargada correctamente")
+        
+        if self.AWS_CONFIG['agent_arn']:
+            logger.info(f"Configuración AWS AgentCore: {self.AWS_CONFIG['agent_arn'][:50]}...")
+        else:
+            logger.warning("AWS_AGENT_ARN no configurado, usando valor por defecto")
 
 config = Config()
 
@@ -74,6 +84,14 @@ class AppState:
         self.token_expires_at = None
 
 app_state = AppState()
+
+# =========================
+# AWS AgentCore
+# =========================
+aws_agent = AWSAgentCore(
+    agent_arn=config.AWS_CONFIG['agent_arn'],
+    region=config.AWS_CONFIG['region']
+)
 
 # =========================
 # Utilidades
@@ -220,8 +238,21 @@ def handle_text_message(from_user: str, content: str) -> None:
     try:
         logger.info(f"Procesando mensaje de texto de {from_user}: {content[:50]}...")
         
-        # Respuesta simple de eco con ID del chat
-        response = f"Echo: {content} | Chat ID: {from_user}"
+        # Usar AWS AgentCore para generar respuesta
+        if aws_agent.is_available():
+            logger.info("Invocando AWS AgentCore para respuesta")
+            agent_response = aws_agent.invoke_agent(content)
+            
+            if agent_response:
+                response = agent_response
+                logger.info("Respuesta generada por AWS AgentCore")
+            else:
+                response = f"Lo siento, no pude procesar tu mensaje en este momento. (ID: {from_user})"
+                logger.warning("AWS AgentCore no devolvió respuesta, usando fallback")
+        else:
+            # Fallback si AWS AgentCore no está disponible
+            response = f"Echo: {content} | Chat ID: {from_user}"
+            logger.warning("AWS AgentCore no disponible, usando modo eco")
         
         # Enviar respuesta
         success = wechat_api.send_message(from_user, response)
